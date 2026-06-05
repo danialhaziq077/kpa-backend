@@ -11,12 +11,12 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // 2. CONNECT TO AIVEN DATABASE
 const pool = mysql.createPool({
-    host: 'kpa-database-dnahaziq077-fa96.l.aivencloud.com', // e.g., xxx.aivencloud.com
-    user: 'avnadmin',        // usually 'avnadmin'
-    password: 'AVNS_wd3aO-6gdoGbiD74Ubw',
+    host: 'kpa-database-dnahaziq077-fa96.l.aivencloud.com',
+    user: 'avnadmin',
+    password: process.env.DB_PASSWORD, // <--- HIDDEN PASSWORD!
     database: 'defaultdb',
     port: 24023,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false } 
 });
 
 pool.getConnection()
