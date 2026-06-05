@@ -1,108 +1,81 @@
-const mqtt = require('mqtt');
-const mysql = require('mysql2');
+const express = require('express');
+const cors = require('cors');
+const mysql = require('mysql2/promise');
 
-// 1. Connect to Aiven Cloud Database
-const db = mysql.createConnection({
-    host: 'kpa-database-dnahaziq077-fa96.l.aivencloud.com', 
-    port: 24023,
-    user: 'avnadmin',
-    password: 'AVNS_wd3aO-6gdoGbiD74Ubw', 
+const app = express();
+
+// 1. SECURITY & LIMITS
+app.use(cors()); // Allows your Vercel website to talk to this server
+app.use(express.json({ limit: '50mb' })); // Allows giant image uploads without crashing!
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// 2. CONNECT TO AIVEN DATABASE
+const pool = mysql.createPool({
+    host: 'kpa-database-dnahaziq077-fa96.l.aivencloud.com', // e.g., xxx.aivencloud.com
+    user: 'avnadmin',        // usually 'avnadmin'
+    password: 'AVNS_wd3aO-6gdoGbiD74Ubw',
     database: 'defaultdb',
-    ssl: {
-        rejectUnauthorized: false
-    }
+    port: 24023,
+    ssl: { rejectUnauthorized: true }
 });
 
-db.connect((err) => {
-    if (err) throw err;
-    console.log('✅ Connected to AIVEN Cloud MySQL Database (defaultdb)');
-});
+pool.getConnection()
+    .then(() => console.log('✅ Connected to Aiven MySQL Database!'))
+    .catch(err => console.error('❌ DB Connection Error:', err));
 
-// 2. Connect to TinkerCode MQTT Broker
-const brokerUrl = 'wss://tinkercode.my:8001';
-const client = mqtt.connect(brokerUrl, {
-    clientId: 'kpa_server_' + Math.random().toString(16).substr(2, 8)
-});
+// 3. THE API ROUTES (The New Bridge)
 
-// Define our communication channels
-const TOPIC_SUBMIT = 'utm/kpa/submit';
-const TOPIC_REQ = 'utm/kpa/admin/request';
-const TOPIC_RES = 'utm/kpa/admin/response';
-const TOPIC_DEL = 'utm/kpa/admin/delete';
-const TOPIC_UPDATE = 'utm/kpa/admin/update_score';
-
-client.on('connect', () => {
-    console.log('📡 Connected to TinkerCode MQTT Broker');
-    client.subscribe([TOPIC_SUBMIT, TOPIC_REQ, TOPIC_DEL, TOPIC_UPDATE], (err) => {
-        if (!err) console.log('👂 Server is actively listening for frontend commands...');
-    });
-});
-
-// Function to fetch DB data and broadcast it to the Admin Dashboard
-function broadcastLeaderboard() {
-    db.execute('SELECT * FROM submissions ORDER BY total_score DESC', (err, results) => {
-        if (err) return console.error('❌ DB Read Error:', err);
-        
-        const payloadList = results.map(row => {
-            let fullData = JSON.parse(row.programs_json);
-            fullData.id = row.id; // Use official Database ID
-            fullData.totalScore = row.total_score; // Use official Database Score
-            return fullData;
-        });
-        
-        client.publish(TOPIC_RES, JSON.stringify(payloadList));
-        console.log('📤 Leaderboard updated and broadcasted to Admin Dashboard.');
-    });
-}
-
-// 3. Process Incoming Commands
-client.on('message', (topic, message) => {
+// Receive a new student application
+app.post('/api/submit', async (req, res) => {
     try {
-        if (topic === TOPIC_SUBMIT) {
-            const payload = JSON.parse(message.toString());
-            console.log(`\n📥 New submission from: ${payload.student_email}`);
+        const { studentName, matric, phone, student_email, programs, totalScore } = req.body;
+        const programsJson = JSON.stringify(programs); // Convert image data to text for the DB
 
-            // Save the ENTIRE payload (including name, matric, phone, images) as JSON
-            const fullJsonString = JSON.stringify(payload);
-            const query = `INSERT INTO submissions (student_email, total_score, programs_json) VALUES (?, ?, ?)`;
-            
-            db.execute(query, [payload.student_email, payload.totalScore, fullJsonString], (err) => {
-                if (!err) broadcastLeaderboard(); // Instantly update the admin!
-            });
-        }
-        
-        else if (topic === TOPIC_REQ) {
-            // Admin just logged in and requested data
-            broadcastLeaderboard();
-        }
-        
-        else if (topic === TOPIC_DEL) {
-            // Admin clicked Delete
-            const dbId = message.toString();
-            db.execute('DELETE FROM submissions WHERE id = ?', [dbId], (err) => {
-                if (!err) {
-                    console.log(`🗑️ Deleted submission ID: ${dbId}`);
-                    broadcastLeaderboard();
-                }
-            });
-        }
-        
-        else if (topic === TOPIC_UPDATE) {
-            // Admin altered the score
-            const data = JSON.parse(message.toString());
-            db.execute('UPDATE submissions SET total_score = ? WHERE id = ?', [data.newScore, data.id], (err) => {
-                if (!err) {
-                    console.log(`✏️ Updated score for ID: ${data.id} to ${data.newScore}`);
-                    broadcastLeaderboard();
-                }
-            });
-        }
-
-    } catch (error) {
-        console.error('⚠️ Error processing message:', error.message);
+        await pool.execute(
+            'INSERT INTO submissions (studentName, matric, phone, student_email, programs, totalScore) VALUES (?, ?, ?, ?, ?, ?)',
+            [studentName, matric, phone, student_email, programsJson, totalScore]
+        );
+        res.status(200).json({ message: "Success" });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to save submission" });
     }
 });
 
-// Keep cloud hosting (Render) awake
-const http = require('http');
-http.createServer((req, res) => res.end('KPA Backend is running!')).listen(process.env.PORT || 3000);
+// Send all data to the Admin Dashboard
+app.get('/api/submissions', async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT * FROM submissions ORDER BY totalScore DESC');
+        res.status(200).json(rows);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch data" });
+    }
+});
+
+// Admin updates a score
+app.post('/api/update', async (req, res) => {
+    try {
+        const { id, newScore } = req.body;
+        await pool.execute('UPDATE submissions SET totalScore = ? WHERE id = ?', [newScore, id]);
+        res.status(200).json({ message: "Score updated" });
+    } catch (err) {
+        res.status(500).json({ error: "Update failed" });
+    }
+});
+
+// Admin deletes a record
+app.post('/api/delete', async (req, res) => {
+    try {
+        const { id } = req.body;
+        await pool.execute('DELETE FROM submissions WHERE id = ?', [id]);
+        res.status(200).json({ message: "Deleted successfully" });
+    } catch (err) {
+        res.status(500).json({ error: "Delete failed" });
+    }
+});
+
+// 4. START THE SERVER
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 HTTP Server is actively listening on port ${PORT}...`);
+});
