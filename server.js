@@ -23,13 +23,92 @@ pool.getConnection()
     .then(() => console.log('✅ Connected to Aiven MySQL Database!'))
     .catch(err => console.error('❌ DB Connection Error:', err));
 
-// 3. THE API ROUTES (The New Bridge)
+// =======================================================================
+// 3. THE API ROUTES (The Bridge)
+// =======================================================================
+
+// --- CLOUD AUTHENTICATION ---
+
+// Register a new user
+app.post('/api/register', async (req, res) => {
+    try {
+        const { name, email, password } = req.body;
+        
+        // Check if email already exists
+        const [existing] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+        if (existing.length > 0) {
+            return res.status(400).json({ error: "Email already registered." });
+        }
+
+        // Save new user
+        await pool.execute('INSERT INTO users (name, email, password) VALUES (?, ?, ?)', [name, email, password]);
+        res.status(200).json({ message: "Registration successful!" });
+    } catch (err) {
+        console.error("Register Error:", err);
+        res.status(500).json({ error: "Failed to register account." });
+    }
+});
+
+// Login an existing user
+app.post('/api/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        
+        const [users] = await pool.query('SELECT * FROM users WHERE email = ? AND password = ?', [email, password]);
+        if (users.length > 0) {
+            // Send back the user data (excluding the password for security)
+            const user = { name: users[0].name, email: users[0].email };
+            res.status(200).json({ message: "Login successful", user });
+        } else {
+            res.status(401).json({ error: "Invalid credentials." });
+        }
+    } catch (err) {
+        console.error("Login Error:", err);
+        res.status(500).json({ error: "Login failed due to server error." });
+    }
+});
+
+// --- GLOBAL SYSTEM SETTINGS ---
+
+// Get the live Merit Scores
+app.get('/api/settings/merit', async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT merit_scores FROM system_settings WHERE id = 1');
+        if (rows.length > 0) {
+            res.status(200).json(rows[0].merit_scores);
+        } else {
+            res.status(404).json({ error: "No settings found" });
+        }
+    } catch (err) {
+        console.error("Fetch Settings Error:", err);
+        res.status(500).json({ error: "Failed to fetch merit scores." });
+    }
+});
+
+// Update the live Merit Scores (Admin Only)
+app.post('/api/settings/merit', async (req, res) => {
+    try {
+        const scoresJson = JSON.stringify(req.body);
+        
+        // This command inserts row #1, but if row #1 already exists, it just updates it!
+        await pool.execute(
+            'INSERT INTO system_settings (id, merit_scores) VALUES (1, ?) ON DUPLICATE KEY UPDATE merit_scores = ?',
+            [scoresJson, scoresJson]
+        );
+        res.status(200).json({ message: "Global Merit Scores Updated!" });
+    } catch (err) {
+        console.error("Save Settings Error:", err);
+        res.status(500).json({ error: "Failed to update merit scores." });
+    }
+});
+
+// --- APPLICATION SUBMISSIONS ---
 
 // Receive a new student application
 app.post('/api/submit', async (req, res) => {
     try {
         const { studentName, matric, phone, student_email, programs, totalScore } = req.body;
-        const programsJson = JSON.stringify(programs); // Convert image data to text for the DB
+        const programsJson = JSON.stringify(programs);
 
         await pool.execute(
             'INSERT INTO submissions (studentName, matric, phone, student_email, programs, totalScore) VALUES (?, ?, ?, ?, ?, ?)',
@@ -37,7 +116,7 @@ app.post('/api/submit', async (req, res) => {
         );
         res.status(200).json({ message: "Success" });
     } catch (err) {
-        console.error(err);
+        console.error("Submit Error:", err);
         res.status(500).json({ error: "Failed to save submission" });
     }
 });
@@ -74,7 +153,9 @@ app.post('/api/delete', async (req, res) => {
     }
 });
 
+// =======================================================================
 // 4. START THE SERVER
+// =======================================================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 HTTP Server is actively listening on port ${PORT}...`);
